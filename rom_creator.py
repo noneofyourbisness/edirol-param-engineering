@@ -125,7 +125,7 @@ def decode_array1(decode_map: bytes, buffer: bytes, position: int, size: int) ->
     
     Args:
         decode_map: 256-byte decode map
-        buffer: Input buffer
+        buffer: Input buffer to decode FROM
         position: Starting position in buffer
         size: Number of bytes to decode
     
@@ -139,8 +139,14 @@ def decode_array1(decode_map: bytes, buffer: bytes, position: int, size: int) ->
         extra = set_low_byte(i, 0)
         
         move_byte = decode_map[var1]
-        byte_val = buffer[position + move_byte + extra]
-        ex_buffer[i] = byte_val
+        
+        # Bounds check to prevent index out of range
+        if position + move_byte + extra < len(buffer):
+            byte_val = buffer[position + move_byte + extra]
+            ex_buffer[i] = byte_val
+        else:
+            # Handle edge case - pad with zeros
+            ex_buffer[i] = 0
     
     return bytes(ex_buffer)
 
@@ -193,16 +199,26 @@ class EncryptionController:
     def decode_array(self, buffer: bytes, position: int, size: int) -> bytes:
         """Decode array using stored header map.
         
+        This matches the C++ implementation:
+        1. Copy data from buffer[position:position+size] to BufferClone
+        2. Use buffer[24:] as the decode map
+        3. Decode BufferClone with position=0
+        
         Args:
-            buffer: Input buffer
-            position: Starting position
-            size: Number of bytes
+            buffer: Input buffer (full file)
+            position: Starting position to extract from
+            size: Number of bytes to decode
         
         Returns:
             Decoded data
         """
-        # Use stored header buffer's decode map
-        return decode_array1(self.header_buffer[24:280], buffer, position, size)
+        # Step 1: Copy from buffer[position:position+size] (like memcpy)
+        buffer_clone = buffer[position:position+size]
+        
+        # Step 2: Use buffer[24:] as decode map, decode from buffer_clone at position 0
+        decoded = decode_array1(buffer[24:280], buffer_clone, 0, size)
+        
+        return decoded
     
     def encode_array(self, buffer: bytes, size: int) -> bytes:
         """Encode array using stored header map.
@@ -222,7 +238,10 @@ class EncryptionController:
             
             move_byte = self.header_buffer[var1 + 24]
             byte_val = buffer[i]
-            ex_buffer[move_byte + extra] = byte_val
+            
+            # Bounds check
+            if move_byte + extra < len(ex_buffer):
+                ex_buffer[move_byte + extra] = byte_val
         
         return bytes(ex_buffer)
 
@@ -294,6 +313,8 @@ def run_extract(param_dat_path: str, output_dir: str) -> int:
     rom_count = hex_array_to_int(header_position[0x130:0x134])
     
     print(f"Extraction: Found {rom_count} ROM bank(s)")
+    print(f"  Patch: address=0x{patch_address:x}, size={patch_size}")
+    print(f"  Rhythm: address=0x{rhythm_address:x}, size={rhythm_size}")
     
     # Extract each ROM bank
     for i in range(rom_count):
@@ -306,6 +327,10 @@ def run_extract(param_dat_path: str, output_dir: str) -> int:
         tone_init_size = encryption.get_data1(3, i)
         tone_init_address = encryption.get_data2(3, i)
         
+        print(f"  Bank {i}: ROM addr=0x{rom_address:x} size={rom_size}, "
+              f"WaveInit addr=0x{wave_init_address:x} size={wave_init_size}, "
+              f"ToneInit addr=0x{tone_init_address:x} size={tone_init_size}")
+        
         # Decode data
         rom_data = encryption.decode_array(buf, rom_address, rom_size)
         wave_init_data = encryption.decode_array(buf, wave_init_address, wave_init_size)
@@ -315,28 +340,33 @@ def run_extract(param_dat_path: str, output_dir: str) -> int:
         rom_path = os.path.join(output_dir, f"ROMData {i}.bin")
         if not write_file(rom_path, rom_data):
             return 1
+        print(f"    Wrote {rom_path}")
         
         # Write wave init data
         wave_path = os.path.join(output_dir, f"WaveInitData {i}.bin")
         if not write_file(wave_path, wave_init_data):
             return 1
+        print(f"    Wrote {wave_path}")
         
         # Write tone init data
         tone_path = os.path.join(output_dir, f"ToneInitData {i}.bin")
         if not write_file(tone_path, tone_init_data):
             return 1
+        print(f"    Wrote {tone_path}")
     
     # Extract patch data
     patch_data = encryption.decode_array(buf, patch_address, patch_size)
     patch_path = os.path.join(output_dir, "PatchData.bin")
     if not write_file(patch_path, patch_data):
         return 1
+    print(f"Wrote {patch_path}")
     
     # Extract rhythm data
     rhythm_data = encryption.decode_array(buf, rhythm_address, rhythm_size)
     rhythm_path = os.path.join(output_dir, "RhythmData.bin")
     if not write_file(rhythm_path, rhythm_data):
         return 1
+    print(f"Wrote {rhythm_path}")
     
     print(f"Extraction complete: {rom_count} ROM bank(s), Patch={patch_size} bytes, Rhythm={rhythm_size} bytes")
     return 0
